@@ -2,6 +2,7 @@ package tenderduty
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	dash "github.com/blockpane/tenderduty/v2/td2/dashboard"
+	"github.com/cosmos/cosmos-sdk/types/query"
+	mstaking "github.com/initia-labs/initia/x/mstaking/types"
 )
 
 var td = &Config{}
@@ -78,6 +81,74 @@ func Run(configFile, stateFile, chainConfigDirectory string, password *string) e
 				<-td.statsChan
 			}
 		}()
+	}
+
+	pivot := ChainConfig{
+		ChainId: td.Chains["B-Harvest"].ChainId,
+		Nodes:  make([]*NodeConfig, len(td.Chains["B-Harvest"].Nodes)),
+	}
+	for i, n := range td.Chains["B-Harvest"].Nodes {
+		nc := NodeConfig{
+			Url: n.Url,
+			AlertIfDown: n.AlertIfDown,
+		}
+
+		pivot.Nodes[i] = &nc
+	}
+
+	err = pivot.newRpc()
+	if err != nil {
+		return err
+	}
+
+	q := mstaking.QueryValidatorsRequest{
+		Status: mstaking.BondStatusBonded,
+		Pagination: &query.PageRequest{
+			Limit: 500,
+		},
+	}
+	b, err := q.Marshal()
+	if err != nil {
+		return err
+	}
+	resp, err := pivot.client.ABCIQuery(td.ctx, "/initia.mstaking.v1.Query/Validators", b)
+	if err != nil {
+		return err
+	}
+	if resp.Response.Value == nil {
+		return errors.New("could not find validators")
+	}
+	vals := &mstaking.QueryValidatorsResponse{}
+	err = vals.Unmarshal(resp.Response.Value)
+	if err != nil {
+		return err
+	}
+
+	cnt := 0
+	for _, val := range vals.Validators {
+		nodes := make([]*NodeConfig, 1)
+		nodes[0] = &NodeConfig{
+			Url: pivot.Nodes[cnt%len(pivot.Nodes)].Url,
+			AlertIfDown: pivot.Nodes[cnt%len(pivot.Nodes)].AlertIfDown,
+		}
+		c := &ChainConfig{
+			name:            val.GetMoniker(),
+			blocksResults:   make([]int, showBLocks),
+			ChainId:         pivot.ChainId,
+			ValAddress:      val.OperatorAddress,
+			ValconsOverride: pivot.ValconsOverride,
+			ExtraInfo:       pivot.ExtraInfo,
+			Alerts:          pivot.Alerts,
+			PublicFallback:  pivot.PublicFallback,
+			// Nodes:           []*NodeConfig{pivot.Nodes[cnt%len(pivot.Nodes)]},
+			Nodes: nodes,
+		}
+		for i := 0; i < showBLocks; i++ {
+			c.blocksResults[i] = 3
+		}
+		td.Chains[val.GetMoniker()] = c
+
+		cnt++
 	}
 
 	for k := range td.Chains {
