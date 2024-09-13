@@ -1,6 +1,8 @@
 package tenderduty
 
 import (
+	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +12,10 @@ import (
 	"time"
 
 	dash "github.com/blockpane/tenderduty/v2/td2/dashboard"
+	"github.com/cometbft/cometbft/rpc/client/http"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
+	"github.com/cosmos/cosmos-sdk/types/query"
+	stakingTypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 var td = &Config{}
@@ -78,6 +84,47 @@ func Run(configFile, stateFile, chainConfigDirectory string, password *string) e
 				<-td.statsChan
 			}
 		}()
+	}
+
+	pivot := td.Chains["B-Harvest"]
+	validators, err := getValsHex(td.ctx, pivot.Nodes[0].Url)
+	if err != nil {
+		return err
+	}
+
+	valInfos, err := getValInfos()
+	if err != nil {
+		return err
+	}
+
+	for _, validatorHex := range validators {
+		nodes := make([]*NodeConfig, 1)
+		nodes[0] = &NodeConfig{
+			Url: pivot.Nodes[0].Url,
+			AlertIfDown: pivot.Nodes[0].AlertIfDown,
+		}
+		var moniker string
+		if valInfos[validatorHex] == "" {
+			moniker = validatorHex[:7] + "..."
+		} else {
+			moniker = valInfos[validatorHex]
+		}
+		c := &ChainConfig{
+			name:            moniker,
+			blocksResults:   make([]int, showBLocks),
+			ChainId:         pivot.ChainId,
+			ValAddress:      validatorHex,
+			ValconsOverride: pivot.ValconsOverride,
+			ExtraInfo:       pivot.ExtraInfo,
+			Alerts:          pivot.Alerts,
+			PublicFallback:  pivot.PublicFallback,
+			// Nodes:           []*NodeConfig{pivot.Nodes[cnt%len(pivot.Nodes)]},
+			Nodes: nodes,
+		}
+		for i := 0; i < showBLocks; i++ {
+			c.blocksResults[i] = 3
+		}
+		td.Chains[moniker] = c
 	}
 
 	// tenderduty health checks:
@@ -191,4 +238,75 @@ func saveOnExit(stateFile string, saved chan interface{}) {
 			return
 		}
 	}
+}
+
+// hex => moniker
+func getValInfos() (map[string]string, error) {
+	output := make(map[string]string)
+
+	file, err := os.Open("val-info.csv")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, record := range records {
+		output[record[0]] = record[1]
+	}
+
+	return output, nil
+}
+
+func getValsHex(ctx context.Context, rpc string) ([]string, error) {
+	client, err := http.New(rpc, "/websocket")
+	if err != nil {
+		return nil, err
+	}
+
+	q := stakingTypes.QueryValidatorsRequest{
+		Status: "BOND_STATUS_BONDED",
+		Pagination: &query.PageRequest{
+			Limit: 500,
+		},
+	}
+	b, err := q.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	path := "/cosmos.staking.v1beta1.Query/Validators"
+	resp, err := client.ABCIQuery(ctx, path, b)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.Response.Code != 0 {
+		return nil, err
+	}
+
+	vals := &stakingTypes.QueryValidatorsResponse{}
+	err = vals.Unmarshal(resp.Response.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	output := make([]string, 0)
+	for _, v := range vals.Validators {
+		pk := secp256k1.PubKey{}
+		err := pk.Unmarshal(v.ConsensusPubkey.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		output = append(output, pk.Address().String())
+	}
+
+	return output, nil
 }

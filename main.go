@@ -4,10 +4,11 @@ import (
 	_ "embed"
 	"flag"
 	"fmt"
-	"golang.org/x/term"
 	"log"
 	"os"
 	"syscall"
+
+	"golang.org/x/term"
 
 	td2 "github.com/blockpane/tenderduty/v2/td2"
 )
